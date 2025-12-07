@@ -11,7 +11,7 @@ export interface NewsHighlight {
 export interface NewsResponse {
   generated_at: string;
   language: Language;
-  status: 'OK' | 'NO NEW UPDATE';
+  status: 'OK' | 'NO NEW UPDATE' | 'QUOTA_EXCEEDED';
   highlights: NewsHighlight[];
 }
 

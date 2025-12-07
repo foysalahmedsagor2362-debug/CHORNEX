@@ -4,11 +4,12 @@ import { NewsCard } from './components/NewsCard';
 import { Footer } from './components/Footer';
 import { fetchNewsUpdates } from './services/geminiService';
 import { AppState, Language, NewsHighlight } from './types';
-import { WifiOff, RefreshCw, Layers } from 'lucide-react';
+import { WifiOff, RefreshCw, Layers, AlertTriangle } from 'lucide-react';
 
 const App: React.FC = () => {
   const [language, setLanguage] = useState<Language>('en');
-  const [refreshInterval, setRefreshInterval] = useState<number>(60000); 
+  // Increase default refresh to 5 minutes to prevent 429 quota exhaustion
+  const [refreshInterval, setRefreshInterval] = useState<number>(300000); 
   const [state, setState] = useState<AppState>({
     data: null,
     loading: true,
@@ -26,12 +27,22 @@ const App: React.FC = () => {
 
     try {
       if (isAutoRefresh) await new Promise(r => setTimeout(r, 1000));
+      
       const { data, sources } = await fetchNewsUpdates(language, previousHighlightsRef.current);
+      
       setState(prev => {
-        const newData = data.status === 'NO NEW UPDATE' && prev.data 
-            ? { ...prev.data, generated_at: data.generated_at, status: data.status }
-            : data;
+        // If status is NO NEW UPDATE or QUOTA_EXCEEDED, keep old data but update meta if needed
+        let newData = data;
         
+        if (data.status === 'NO NEW UPDATE' && prev.data) {
+             newData = { ...prev.data, generated_at: data.generated_at, status: data.status };
+        } else if (data.status === 'QUOTA_EXCEEDED') {
+             // If we got quota exceeded, we are displaying cached data.
+             // We can use the cached data returned from service.
+             newData = data;
+        }
+
+        // Only update reference highlights if we actually got a fresh OK response
         if (data.status === 'OK') {
             previousHighlightsRef.current = data.highlights;
         }
@@ -44,12 +55,12 @@ const App: React.FC = () => {
           sources: sources.length > 0 ? sources : prev.sources,
         };
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
       setState(prev => ({
         ...prev,
         loading: false,
-        error: "Connection lost. The neural feed is temporarily unavailable.",
+        error: err.message || "Connection lost. The neural feed is temporarily unavailable.",
       }));
     }
   }, [language]);
@@ -88,12 +99,21 @@ const App: React.FC = () => {
             <h2 className="text-4xl md:text-5xl font-bold text-white tracking-tight mb-2">Global Briefing</h2>
             <p className="text-gray-500 font-mono text-sm">{today} • EDITION</p>
           </div>
-          {state.data && state.data.status === 'NO NEW UPDATE' && (
-             <div className="hidden sm:flex items-center gap-2 px-3 py-1 bg-void-card border border-void-border rounded text-xs text-gray-500">
-                <Layers size={12} />
-                CACHED VIEW
-             </div>
-          )}
+          
+          <div className="flex flex-col gap-2 items-end">
+             {state.data && state.data.status === 'NO NEW UPDATE' && (
+                <div className="hidden sm:flex items-center gap-2 px-3 py-1 bg-void-card border border-void-border rounded text-xs text-gray-500">
+                   <Layers size={12} />
+                   CACHED VIEW
+                </div>
+             )}
+             {state.data && state.data.status === 'QUOTA_EXCEEDED' && (
+                <div className="flex items-center gap-2 px-3 py-1 bg-yellow-900/20 border border-yellow-700/50 rounded text-xs text-yellow-500">
+                   <AlertTriangle size={12} />
+                   HIGH TRAFFIC: SERVING ARCHIVE
+                </div>
+             )}
+          </div>
         </div>
 
         {/* Error State */}
