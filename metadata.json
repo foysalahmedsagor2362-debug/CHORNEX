@@ -1,0 +1,5 @@
+{
+  "name": "Copy of CHORNEX News Engine",
+  "description": "An automated international news summarization engine powered by Gemini 2.5 Flash and Google Search, delivering real-time global highlights in English and Bangla.",
+  "requestFramePermissions": []
+}
