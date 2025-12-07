@@ -11,8 +11,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     define: {
-      // Polyfill process.env.API_KEY. Use empty string fallback to prevent 'undefined' in code.
-      'process.env.API_KEY': JSON.stringify(env.API_KEY || '')
+      // Polyfill process.env for API keys. Use empty string fallback to prevent 'undefined' in code.
+      'process.env.API_KEY': JSON.stringify(env.API_KEY || ''),
+      'process.env.OPENAI_API_KEY': JSON.stringify(env.OPENAI_API_KEY || '')
     }
   };
 });

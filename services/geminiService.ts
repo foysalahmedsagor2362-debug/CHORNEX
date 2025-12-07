@@ -80,14 +80,37 @@ const FALLBACK_DATA: NewsResponse = {
   ]
 };
 
-// Initialize AI Client Safely
-let ai: GoogleGenAI;
-try {
-  // process.env.API_KEY is injected by Vite. If empty, the service will gracefully fail later.
-  ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-} catch (e) {
-  console.error("Failed to initialize Gemini Client", e);
-}
+// --- OPENAI FALLBACK HANDLER ---
+const fetchOpenAIFallback = async (prompt: string, language: Language): Promise<NewsResponse> => {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OpenAI API Key not configured");
+
+  console.log("Attempting OpenAI Fallback...");
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SYSTEM_INSTRUCTION },
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI Error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  const text = data.choices[0]?.message?.content || "{}";
+  return JSON.parse(text);
+};
 
 export const fetchNewsUpdates = async (
   language: Language,
@@ -110,24 +133,7 @@ export const fetchNewsUpdates = async (
     }
   }
 
-  // 2. Validate Configuration
-  if (!process.env.API_KEY) {
-     console.warn("API Key is missing.");
-     // Return a specific error highlight for missing configuration
-     const configErrorData = { ...FALLBACK_DATA };
-     configErrorData.highlights = [{
-        headline: "Configuration Required",
-        summary: "The News Engine API Key is missing. Please configure the API_KEY environment variable in your deployment settings.",
-        category: "security",
-        timestamp: "Setup Error",
-        url: "#"
-     }];
-     return { data: configErrorData, sources: [] };
-  }
-
-  const model = "gemini-2.5-flash"; 
-  
-  // OPTIMIZATION: Reduce token usage by sending only minimal context
+  // 2. Prepare Prompt
   const simplifiedContext = previousHighlights.map(h => ({
       headline: h.headline, 
       category: h.category
@@ -137,24 +143,22 @@ export const fetchNewsUpdates = async (
     Current Time: ${new Date().toISOString()}
     Target Language: ${language}
     
-    Previous Highlights Context (Check for duplicates against this):
+    Previous Highlights Context:
     ${JSON.stringify(simplifiedContext)}
 
     INSTRUCTION:
-    1. Search for the absolute latest global news.
-    2. Search specifically for major news events in Bangladesh from the last 12 hours.
-    3. Compare with the "Previous Highlights Context".
-    4. If significant new stories exist, generate a new list. This list MUST contain:
-       - Top global news highlights.
-       - EXACTLY ONE highlight specifically about Bangladesh (category: "bangladesh").
-    5. Ensure each highlight includes a valid source URL in the "url" field.
-    6. If the news cycle is slow and nothing major has changed since the previous list, return status "NO NEW UPDATE" and include the previous list.
-    7. Output raw JSON.
+    1. Search/Generate absolute latest global news.
+    2. Include exactly ONE major news from Bangladesh.
+    3. Output raw JSON matching the schema.
   `;
 
+  // 3. Attempt Gemini (Primary)
   try {
+    if (!process.env.API_KEY) throw new Error("Gemini API Key missing");
+    
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const response = await ai.models.generateContent({
-      model: model,
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
@@ -164,14 +168,7 @@ export const fetchNewsUpdates = async (
 
     const text = response.text || "{}";
     const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    
-    let parsedData: NewsResponse;
-    try {
-        parsedData = JSON.parse(cleanText);
-    } catch (e) {
-        console.error("Failed to parse JSON", text);
-        throw new Error("Invalid response format from news engine.");
-    }
+    const parsedData = JSON.parse(cleanText);
 
     // Extract grounding metadata for sources
     const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
@@ -179,7 +176,7 @@ export const fetchNewsUpdates = async (
       .map((chunk: any) => chunk.web)
       .filter((web: any) => web && web.uri && web.title);
 
-    // Save successful fetch to cache
+    // Cache success
     localStorage.setItem(CACHE_KEY, JSON.stringify({
         data: parsedData,
         sources,
@@ -190,29 +187,39 @@ export const fetchNewsUpdates = async (
     return { data: parsedData, sources };
 
   } catch (error: any) {
-    console.error("News fetch error details:", error);
+    console.warn("Primary Provider (Gemini) Failed:", error.message);
     
-    // FAIL-SAFE STRATEGY:
-    // Regardless of the error (Network, 429 Quota, Parsing, Auth), 
-    // we try to serve CACHE first, then fall back to STATIC data.
-    // We NEVER throw an error that crashes the UI.
+    // 4. Attempt OpenAI (Fallback)
+    if (process.env.OPENAI_API_KEY) {
+      try {
+        const openAIData = await fetchOpenAIFallback(prompt, language);
+        
+        // Cache OpenAI success
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+            data: openAIData,
+            sources: [], // OpenAI doesn't provide grounding sources easily in this mode
+            timestamp: Date.now(),
+            lang: language
+        }));
 
-    // 1. Try Cache (Any language is better than error)
-    const cached = localStorage.getItem(CACHE_KEY);
+        return { data: openAIData, sources: [] };
+      } catch (openAIError: any) {
+        console.warn("Secondary Provider (OpenAI) Failed:", openAIError.message);
+      }
+    }
+
+    // 5. Emergency Fallback (If both fail or no Cache)
+    // Check if we have OLD cache to serve instead of generic fallback?
     if (cached) {
-        try {
-            const { data, sources } = JSON.parse(cached);
-            // Mark as QUOTA_EXCEEDED so the UI shows the "Archive" badge
-            return { 
-                data: { ...data, status: 'QUOTA_EXCEEDED' }, 
-                sources 
-            };
-        } catch (e) {
-            // ignore cache parse error
-        }
+      try {
+        const { data, sources } = JSON.parse(cached);
+        return { 
+            data: { ...data, status: 'QUOTA_EXCEEDED' }, 
+            sources 
+        };
+      } catch (e) {}
     }
     
-    // 2. Return Static Fallback if no cache available
     return { data: FALLBACK_DATA, sources: [] };
   }
 };
